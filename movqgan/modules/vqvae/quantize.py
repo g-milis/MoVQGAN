@@ -5,6 +5,8 @@ import numpy as np
 from torch import einsum
 from einops import rearrange
 
+from watermarking import replace_codes_within_clusters
+
 
 class VectorQuantizer2(nn.Module):
     """
@@ -64,7 +66,7 @@ class VectorQuantizer2(nn.Module):
         back=torch.gather(used[None,:][inds.shape[0]*[0],:], 1, inds)
         return back.reshape(ishape)
 
-    def forward(self, z, temp=None, rescale_logits=False, return_logits=False):
+    def forward(self, z, temp=None, rescale_logits=False, return_logits=False, clusters=None, rate=1.0):
         assert temp is None or temp==1.0, "Only for interface compatible with Gumbel"
         assert rescale_logits==False, "Only for interface compatible with Gumbel"
         assert return_logits==False, "Only for interface compatible with Gumbel"
@@ -77,7 +79,13 @@ class VectorQuantizer2(nn.Module):
             torch.sum(self.embedding.weight**2, dim=1) - 2 * \
             torch.einsum('bd,dn->bn', z_flattened, rearrange(self.embedding.weight, 'n d -> d n'))
 
-        min_encoding_indices = torch.argmin(d, dim=1)
+        min_encoding_indices_plain = torch.argmin(d, dim=1)
+
+        if clusters is not None:
+            min_encoding_indices = replace_codes_within_clusters(min_encoding_indices_plain, clusters, rate)
+        else:
+            min_encoding_indices = min_encoding_indices_plain
+
         z_q = self.embedding(min_encoding_indices).view(z.shape)
         perplexity = None
         min_encodings = None
