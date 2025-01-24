@@ -21,6 +21,24 @@ class JpegDataset(Dataset):
         if max_items is not None:
             self.file_paths = self.file_paths[:max_items]
 
+
+    def preprocess(self, image):
+        """Image to Tensor."""
+        image = self.transform(image).convert("RGB")
+        image = np.array(image)
+        image = image.astype(np.float32) / 127.5 - 1
+        image_tensor = torch.from_numpy(np.transpose(image, [2, 0, 1]))
+        return image_tensor
+
+
+    def postprocess(self, image_tensor):
+        """Tensor to Image."""
+        image_tensor = image_tensor.permute(1, 2, 0).numpy()
+        image_tensor = ((image_tensor + 1) * 127.5).clip(0, 255).astype(np.uint8)
+        image = Image.fromarray(image_tensor)
+        return image
+
+
     def _find_jpeg_files(self, directory):
         jpeg_files = []
         for root, _, files in os.walk(directory):
@@ -29,16 +47,16 @@ class JpegDataset(Dataset):
                     jpeg_files.append(os.path.join(root, file))
         return jpeg_files
 
+
     def __len__(self):
         return len(self.file_paths)
+
 
     def __getitem__(self, idx):
         img_path = self.file_paths[idx]
         image = Image.open(img_path)
-        image = self.transform(image).convert("RGB")
-        image = np.array(image)
-        image = image.astype(np.float32) / 127.5 - 1
-        return torch.from_numpy(np.transpose(image, [2, 0, 1]))
+        image_tensor = self.preprocess(image)
+        return img_path, image_tensor
 
 
 if __name__ == "__main__":

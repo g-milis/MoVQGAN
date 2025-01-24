@@ -79,7 +79,11 @@ class VectorQuantizer2(nn.Module):
             torch.sum(self.embedding.weight**2, dim=1) - 2 * \
             torch.einsum('bd,dn->bn', z_flattened, rearrange(self.embedding.weight, 'n d -> d n'))
 
-        min_encoding_indices_plain = torch.argmin(d, dim=1)
+        # Original
+        # min_encoding_indices_plain = torch.argmin(d, dim=1)
+
+        _, sorted_indices = torch.sort(d, dim=1)
+        min_encoding_indices_plain = sorted_indices[:, 0]
 
         if clusters is not None:
             min_encoding_indices = replace_codes_within_clusters(min_encoding_indices_plain, clusters, rate)
@@ -104,6 +108,9 @@ class VectorQuantizer2(nn.Module):
         # reshape back to match original input shape
         z_q = rearrange(z_q, 'b h w c -> b c h w').contiguous()
 
+        # print(self.remap, self.sane_index_shape) -> None False
+        # So min_encoding_indices are unchanged
+
         if self.remap is not None:
             min_encoding_indices = min_encoding_indices.reshape(z.shape[0],-1) # add batch axis
             min_encoding_indices = self.remap_to_used(min_encoding_indices)
@@ -113,7 +120,7 @@ class VectorQuantizer2(nn.Module):
             min_encoding_indices = min_encoding_indices.reshape(
                 z_q.shape[0], z_q.shape[2], z_q.shape[3])
 
-        return z_q, loss, (perplexity, min_encodings, min_encoding_indices)
+        return z_q, loss, (perplexity, min_encodings, min_encoding_indices, sorted_indices)
 
     def get_codebook_entry(self, indices, shape):
         # shape specifying (batch, height, width, channel)

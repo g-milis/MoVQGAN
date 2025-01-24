@@ -1,6 +1,7 @@
+import os
 import torch
-import numpy as np
 from sklearn.cluster import KMeans
+from PIL import Image
 
 from torch.utils.data import DataLoader
 from torch.nn.functional import mse_loss, l1_loss
@@ -13,12 +14,6 @@ import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
 
-def postprocess(image_tensor):
-    image_tensor = image_tensor.permute(1, 2, 0).numpy()
-    image_tensor = ((image_tensor + 1) * 127.5).clip(0, 255).astype(np.uint8)
-    return image_tensor
-
-
 def get_cluster_indices(clustering_object):
     clusters = {i: [] for i in range(clustering_object.n_clusters)}
     for idx, label in enumerate(clustering_object.labels_):
@@ -28,73 +23,89 @@ def get_cluster_indices(clustering_object):
 
 
 # SETTINGS
-k = 1000
+k = 5000
 model_size = "270M" # [67M, 102M, 270M]
 batch_size = 1
 device = "mps"
-payload = 0b1010101010101010101010101010101010101010101010101010101010101000
+payload = 2025
+n_payload_bits = 32
 
 
-model = get_movqgan_model(model_size, pretrained=True, device=device)
+for model_size in ["67M", "102M", "270M"]:
 
-embeddings = model.quantize.embedding.weight
-embeddings = embeddings.detach().cpu().numpy()
+    print(model_size)
 
-mse_results = []
-l1_results = []
+    model = get_movqgan_model(model_size, pretrained=True, device=device)
+
+    embeddings = model.quantize.embedding.weight
+    embeddings = embeddings.detach().cpu().numpy()
+
+    mse_results = []
+    l1_results = []
 
 
-kmeans = KMeans(n_clusters=k, random_state=42)
-kmeans.fit(embeddings)
-clusters = get_cluster_indices(kmeans)
+    kmeans = KMeans(n_clusters=k, random_state=42)
+    kmeans.fit(embeddings)
+    clusters = get_cluster_indices(kmeans)
 
-dataloader = DataLoader(
-    JpegDataset(
+    dataset = JpegDataset(
         "/Users/georgemilis/Research/Small-ImageNet-Validation-Dataset-1000-Classes",
-        max_items=5
-    ),
-    batch_size=batch_size,
-    shuffle=False
-)
+        max_items=50
+    )
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False
+    )
 
-total_mse = 0.0
-total_l1 = 0.0
-total_samples = 0
-detections = 0
+    total_mse = 0.0
+    total_l1 = 0.0
+    total_samples = 0
+    detections = 0
 
-for idx, batch_images in enumerate(dataloader):
+    for batch_paths, batch_images in dataloader:
 
-    batch_images = batch_images.to(device)
+        batch_images = batch_images.to(device)
 
-    with torch.no_grad():
-        quant, loss, (perplexity, min_encodings, codebook_indices) = model.encode(batch_images, clusters=clusters)
+        with torch.no_grad():
+            quant, loss, (perplexity, min_encodings, codebook_indices) = model.encode(batch_images, clusters=clusters)
 
-        codes = codebook_indices
-        watermarked = watermarking.redgreen_embed_payload(codes, clusters=clusters, payload=payload, n_payload_bits=64)
+            codes = codebook_indices
+            watermarked_indices = watermarking.redgreen_embed_payload(codes, clusters=clusters, payload=payload, n_payload_bits=n_payload_bits)
+            watermarked_image = model.decode_code(watermarked_indices.view(1, 64, 64))
 
-        detection_info = watermarking.detect_payload(watermarked, clusters=clusters, n_payload_bits=64)
-        if detection_info["watermarked"]:
-            if detection_info["payload"] == payload:
-                detections += 1
-        print(detection_info["average_bits"])
+            save_path = f"/Users/georgemilis/Research/MoVQGAN/out/{os.path.basename(batch_paths[0]).replace(".JPEG", "")}_watermarked_{k}_{model_size}.png"
+            watermarked_image_tensor = watermarked_image.cpu()[0]
+            watermarked_image = dataset.postprocess(watermarked_image_tensor)
+            watermarked_image.save(save_path)
 
-        out = model.decode_code(watermarked.view(batch_size, 64, 64))
+            watermarked_image = Image.open(save_path)
+            watermarked_image_tensor = dataset.preprocess(watermarked_image).to(device).unsqueeze(0)
 
+            quant, loss, (perplexity, min_encodings, reencoded_indices) = model.encode(watermarked_image_tensor)
 
-    batch_mse = mse_loss(batch_images, out).item()
-    batch_l1 = l1_loss(batch_images, out).item()
+            print("Code preservation:", (watermarked_indices == reencoded_indices).cpu().numpy().mean())
 
-    # Accumulate loss
-    total_mse += batch_mse * batch_images.size(0)
-    total_l1 += batch_l1 * batch_images.size(0)
-    total_samples += batch_images.size(0)
+            detection_info = watermarking.detect_payload(reencoded_indices, clusters=clusters, n_payload_bits=n_payload_bits)
+            if detection_info["watermarked"]: # always True
+                if detection_info["payload"] == payload:
+                    detections += 1
 
+        batch_mse = mse_loss(batch_images, watermarked_image_tensor).item()
+        batch_l1 = l1_loss(batch_images, watermarked_image_tensor).item()
 
-# Compute the average losses for the dataset
-avg_mse = total_mse / total_samples
-avg_l1 = total_l1 / total_samples
-avg_detection = detections / total_samples
+        # Accumulate loss
+        total_mse += batch_mse * batch_images.size(0)
+        total_l1 += batch_l1 * batch_images.size(0)
+        total_samples += batch_images.size(0)
 
-print(f"Average MSE: {avg_mse}")
-print(f"Average L1: {avg_l1}")
-print(f"Average Detection: {avg_detection}")
+        # break
+
+    # Compute the average losses for the dataset
+    avg_mse = total_mse / total_samples
+    avg_l1 = total_l1 / total_samples
+    avg_detection = detections / total_samples
+
+    print(f"Average MSE: {avg_mse}")
+    print(f"Average L1: {avg_l1}")
+    print(f"Average Detection: {avg_detection}")
